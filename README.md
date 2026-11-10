@@ -23,7 +23,8 @@ Open `.env` and fill in:
 
 | Variable | What to put |
 |---|---|
-| `DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD` | Your PostgreSQL credentials |
+| `DATABASE_URL` | Optional PostgreSQL connection string. For Supabase, copy it from **Project Settings → Database → Connection string**; when set, it takes precedence over the fields below. |
+| `DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD` | PostgreSQL credentials used when `DATABASE_URL` is blank |
 | `JWT_ACCESS_SECRET` | Random 64-char hex string (see below) |
 | `JWT_REFRESH_SECRET` | Another random 64-char hex string |
 | `SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS` | Your email credentials (see below) |
@@ -42,6 +43,13 @@ Run `bingnondo_database.sql` against your PostgreSQL instance:
 ```bash
 psql -U postgres -d bingnondo -f bingnondo_database.sql
 ```
+
+After loading the base schema or a database dump that includes mobile OTP
+authentication, apply `migrations/2026-11-10_remove_mobile_auth.sql` once. It
+removes pending mobile-only registrations and outstanding SMS OTPs, but
+preserves customer accounts and `customers.mobile_number` profile/contact data.
+Existing mobile-only customer rows are preserved, but cannot sign in until an
+email address is associated with the account.
 
 ### 4. Run the server
 
@@ -127,7 +135,7 @@ Body: { "email": "...", "purpose": "email_verification" }
 
 ```
 POST /api/auth/customer/login
-Body: { "email": "email or mobile number", "password": "..." }
+Body: { "email": "customer@example.com", "password": "..." }
 
 → 200  { message, accessToken, refreshToken, user }
 → 401  Incorrect email or password
@@ -155,7 +163,8 @@ Body: { "email": "email or mobile number", "password": "..." }
 POST /api/auth/forgot-password
 Body: { "email": "..." }
 
-→ 200  { message }    ← always 200 (doesn't reveal if email is registered)
+→ 200  { message }
+→ 404  No account found with that email address.
 ```
 
 ### Verify Password Reset OTP

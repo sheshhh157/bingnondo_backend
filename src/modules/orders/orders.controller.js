@@ -17,7 +17,7 @@
  *   3. Insert orders row
  *   4. Insert order_items rows
  *   5. Insert payments row (method = gcash|cash_on_delivery)
- *   6. Insert deliveries row (online orders only, delivery_preference = 'own_delivery')
+ *   6. Insert deliveries row unless the customer selected pickup
  *   7. Insert order_status_history row (status = 'pending')
  *   8. Emit Socket.io `new_order` if status auto-advances (COD → confirmed)
  *   9. Return {id, order_number, status, total_amount}
@@ -31,6 +31,7 @@ const pool = require('../../config/db');
 const { getIO, emitNewOrder, emitOrderStatusUpdate } = require('../../sockets/socket');
 const { syncChatLockState } = require('../support-chat/support_chat.controller');
 const { notifyOrderStatus } = require('../../utils/order_notifications');
+const { computeBusinessHoursStatus } = require('../business-hours/business_hours.controller');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -74,14 +75,28 @@ const STATUS_LABELS = {
   cancelled:          'Cancelled',
 };
 
+const PICKUP_STATUS_ORDER = [
+  'pending',
+  'confirmed',
+  'preparing',
+  'ready',
+  'completed',
+];
+
+const PICKUP_STATUS_LABELS = {
+  ...STATUS_LABELS,
+  ready:     'Ready for Pickup',
+  completed: 'Picked Up',
+};
+
 // ─── POST /api/orders ─────────────────────────────────────────────────────────
 
 async function placeOrder(req, res, next) {
   const customerId = req.customerId;
 
   const {
-    items,                  // [{ menu_item_id, quantity, unit_price?, note? }]
-    delivery_preference,    // 'own_delivery'
+    items,                  // [{ menu_item_id, quantity, unit_price?, note?, variant_id?, variant_name? }]
+    delivery_preference,    // 'own_delivery' | 'lalamove' | 'pickup'
     payment_method,         // 'gcash' | 'cod'
     notes,                  // optional overall order note
     gcash_receipt_temp_url, // Cloudinary temp URL (GCash only) — from extract-receipt
@@ -90,7 +105,15 @@ async function placeOrder(req, res, next) {
     delivery_address,       // pin-drop address for THIS order (optional)
     delivery_latitude,      // pin latitude (optional)
     delivery_longitude,     // pin longitude (optional)
+    // delivery_fee from client is ignored — always read from system_settings
   } = req.body;
+
+  const deliveryPreference =
+    delivery_preference === 'lalamove'
+      ? 'lalamove'
+      : delivery_preference === 'pickup'
+        ? 'pickup'
+        : 'own_delivery';
 
   // ── Validate input ──────────────────────────────────────────────────────────
   if (!items || !Array.isArray(items) || items.length === 0) {
@@ -119,6 +142,17 @@ async function placeOrder(req, res, next) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // ── Business hours: only accept orders while the cafe is open ────────────
+    const businessHours = await computeBusinessHoursStatus(client);
+    if (!businessHours.is_open) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        message: `Bingnondo is not accepting orders right now. ${businessHours.message}`,
+        code: 'restaurant_closed',
+        business_hours: businessHours,
+      });
+    }
 
     // ── Gate check: profile_completed ─────────────────────────────────────────
     const profileResult = await client.query(
@@ -208,34 +242,69 @@ async function placeOrder(req, res, next) {
       });
     }
 
-    totalAmount = Math.round(totalAmount * 100) / 100; // round to 2dp
+    totalAmount = Math.round(totalAmount * 100) / 100; // round to 2dp — this is the subtotal
 
-    // ── Resolve the delivery snapshot for this order ──────────────────────────
-    // Prefer the pin the customer chose at checkout; fall back to their saved
-    // profile address so riders always have a destination.
-    const orderAddress =
-      (typeof delivery_address === 'string' ? delivery_address.trim() : '') ||
-      savedAddress ||
-      null;
+    // ── Fetch delivery fee for delivery orders ────────────────────────────────
+    let deliveryFee = 0;
+    if (deliveryPreference !== 'pickup') {
+      try {
+        const feeResult = await client.query(
+          `SELECT value FROM system_settings WHERE key = 'delivery_fee'`
+        );
+        if (feeResult.rows.length > 0) {
+          const feeSetting = feeResult.rows[0].value;
+          if (feeSetting.enabled === true && typeof feeSetting.amount === 'number') {
+            deliveryFee = feeSetting.amount;
+          }
+        }
+      } catch (_) {
+        // If system_settings fails, default to 0 — non-fatal
+      }
+    }
+    deliveryFee = Math.round(deliveryFee * 100) / 100;
 
-    const latNum = Number(delivery_latitude);
-    const lngNum = Number(delivery_longitude);
-    const orderLatitude  = Number.isFinite(latNum) && latNum >= -90  && latNum <= 90
-      ? latNum
-      : (savedLat ?? null);
-    const orderLongitude = Number.isFinite(lngNum) && lngNum >= -180 && lngNum <= 180
-      ? lngNum
-      : (savedLng ?? null);
+    const subtotal    = totalAmount;
+    totalAmount       = Math.round((subtotal + deliveryFee) * 100) / 100;
+
+    let orderAddress = null;
+    let orderLatitude = null;
+    let orderLongitude = null;
+
+    if (deliveryPreference !== 'pickup') {
+      // Prefer the checkout pin; fall back to the customer's saved location.
+      orderAddress =
+        (typeof delivery_address === 'string' ? delivery_address.trim() : '') ||
+        savedAddress ||
+        null;
+
+      const latNum = Number(delivery_latitude);
+      const lngNum = Number(delivery_longitude);
+      orderLatitude = Number.isFinite(latNum) && latNum >= -90 && latNum <= 90
+        ? latNum
+        : (savedLat ?? null);
+      orderLongitude = Number.isFinite(lngNum) && lngNum >= -180 && lngNum <= 180
+        ? lngNum
+        : (savedLng ?? null);
+    }
 
     // ── Generate order number ─────────────────────────────────────────────────
     const orderNumber = await generateOrderNumber(client);
 
     // ── Insert orders ─────────────────────────────────────────────────────────
+    // Add delivery_fee column to orders if it doesn't exist yet (safe migration)
+    await client.query(
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2) DEFAULT 0`
+    ).catch(() => {});
+    await client.query(
+      `ALTER TABLE orders
+         ADD COLUMN IF NOT EXISTS delivery_preference VARCHAR(20) NOT NULL DEFAULT 'own_delivery'`
+    );
+
     const orderResult = await client.query(
       `INSERT INTO orders
-         (order_type, customer_id, status, order_channel, total_amount, special_request,
-          delivery_address, delivery_latitude, delivery_longitude)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (order_type, customer_id, status, order_channel, total_amount, delivery_fee, special_request,
+          delivery_address, delivery_latitude, delivery_longitude, delivery_preference)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id, status`,
       [
         'online',
@@ -243,10 +312,12 @@ async function placeOrder(req, res, next) {
         'pending',
         'mobile_app',
         totalAmount,
+        deliveryFee,
         notes || null,
         orderAddress,
         orderLatitude,
         orderLongitude,
+        deliveryPreference,
       ]
     );
 
@@ -270,15 +341,40 @@ async function placeOrder(req, res, next) {
     // ── Insert order_items ────────────────────────────────────────────────────
     for (const item of items) {
       const menuItem = menuMap.get(item.menu_item_id);
+
+      // If the client sent a variant_id, verify it belongs to this item and
+      // use the variant's price; otherwise fall back to the base item price.
+      let unitPrice = menuItem.price;
+      let variantId   = item.variant_id   ?? null;
+      let variantName = item.variant_name ?? null;
+
+      if (variantId) {
+        const varResult = await client.query(
+          `SELECT id, name, price FROM menu_item_variants
+           WHERE id = $1 AND menu_item_id = $2 AND is_available = TRUE`,
+          [variantId, item.menu_item_id]
+        );
+        if (varResult.rows.length === 0) {
+          // Unknown or unavailable variant — clear it and use base price
+          variantId   = null;
+          variantName = null;
+        } else {
+          unitPrice   = parseFloat(varResult.rows[0].price);
+          variantName = varResult.rows[0].name; // use DB name as source of truth
+        }
+      }
+
       await client.query(
-        `INSERT INTO order_items (order_id, menu_item_id, quantity, unit_price, notes)
-         VALUES ($1, $2, $3, $4, $5)`,
+        `INSERT INTO order_items (order_id, menu_item_id, quantity, unit_price, notes, variant_id, variant_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           orderId,
           item.menu_item_id,
           item.quantity,
-          menuItem.price,
+          unitPrice,
           item.note || null,
+          variantId,
+          variantName,
         ]
       );
     }
@@ -310,12 +406,37 @@ async function placeOrder(req, res, next) {
       ]
     );
 
-    // ── Insert deliveries (own_delivery or default) ───────────────────────────
-    await client.query(
-      `INSERT INTO deliveries (order_id, delivery_preference, status)
-       VALUES ($1, 'own_delivery', 'pending_assignment')`,
-      [orderId]
-    );
+    // ── Insert deliveries unless this is a pickup order ────────────────────────
+    if (deliveryPreference !== 'pickup') {
+      let hasAvailableRider = true;
+      try {
+        const { rows } = await client.query(
+          `SELECT 1 FROM riders
+            WHERE work_status = 'working'
+               OR admin_work_override = 'working'
+            LIMIT 1`
+        );
+        hasAvailableRider = rows.length > 0;
+      } catch (err) {
+        console.error('[placeOrder] rider availability check failed:', err.message);
+      }
+
+      if (!hasAvailableRider) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message:
+            'Delivery is not available right now — no riders are online. ' +
+            'Please choose Pickup instead.',
+          code: 'no_riders_available',
+        });
+      }
+
+      await client.query(
+        `INSERT INTO deliveries (order_id, delivery_preference, status)
+         VALUES ($1, $2, 'pending_assignment')`,
+        [orderId, deliveryPreference]
+      );
+    }
 
     // ── Insert initial status history ─────────────────────────────────────────
     await client.query(
@@ -362,6 +483,8 @@ async function placeOrder(req, res, next) {
       id:           orderId,
       order_number: orderNumber,
       status:       orderStatus,
+      subtotal:     subtotal,
+      delivery_fee: deliveryFee,
       total_amount: totalAmount,
       payment_url:  null, // GCash is manual receipt upload, not PayMongo redirect
     });
@@ -388,6 +511,7 @@ async function listOrders(req, res, next) {
          o.status,
          o.total_amount,
          o.created_at,
+         o.delivery_preference,
          p.method AS payment_method,
          COUNT(oi.id)::int AS item_count
        FROM orders o
@@ -426,6 +550,7 @@ async function getOrder(req, res, next) {
          COALESCE(o.order_number, 'BNG-' || o.id::text) AS order_number,
          o.status,
          o.total_amount,
+         o.delivery_preference,
          o.special_request AS notes,
          o.delivery_address,
          o.delivery_latitude,
@@ -488,6 +613,7 @@ async function getOrder(req, res, next) {
       order_number:    order.order_number,
       status:          order.status,
       total_amount:    parseFloat(order.total_amount),
+      delivery_preference: order.delivery_preference,
       notes:           order.notes,
       delivery_address:   order.delivery_address,
       delivery_latitude:  order.delivery_latitude,
@@ -549,6 +675,7 @@ async function getOrderStatus(req, res, next) {
          COALESCE(o.order_number, 'BNG-' || o.id::text) AS order_number,
          o.status,
          p.status        AS payment_status,
+         o.delivery_preference,
          d.status        AS delivery_status,
          d.rider_name,
          d.rider_contact,
@@ -581,6 +708,7 @@ async function getOrderStatus(req, res, next) {
       id:             row.id,
       order_number:   row.order_number,
       status:         row.status,
+      delivery_preference: row.delivery_preference,
       can_cancel:     canCancel,
       payment_status: row.payment_status,
       delivery: row.delivery_status
@@ -617,7 +745,7 @@ async function getOrderStatus(req, res, next) {
 // Future statuses have is_completed=false, is_current=false, changed_at=null.
 // Cancelled orders show only statuses up to (and including) cancelled.
 
-const STATUS_ORDER = [
+const DELIVERY_STATUS_ORDER = [
   'pending',
   'confirmed',
   'preparing',
@@ -640,7 +768,8 @@ async function getOrderTimeline(req, res, next) {
       `SELECT
          o.id,
          COALESCE(o.order_number, 'BNG-' || o.id::text) AS order_number,
-         o.status AS current_status
+         o.status AS current_status,
+         o.delivery_preference
        FROM orders o
        WHERE o.id = $1
          AND o.customer_id = $2
@@ -652,7 +781,10 @@ async function getOrderTimeline(req, res, next) {
       return res.status(404).json({ message: 'Order not found.' });
     }
 
-    const { order_number, current_status } = orderResult.rows[0];
+    const { order_number, current_status, delivery_preference } = orderResult.rows[0];
+    const isPickup = delivery_preference === 'pickup';
+    const statusOrder = isPickup ? PICKUP_STATUS_ORDER : DELIVERY_STATUS_ORDER;
+    const statusLabels = isPickup ? PICKUP_STATUS_LABELS : STATUS_LABELS;
 
     // Get the actual history rows (each status change with timestamp)
     const historyResult = await pool.query(
@@ -678,12 +810,12 @@ async function getOrderTimeline(req, res, next) {
     if (isCancelled) {
       // For cancelled orders: show all statuses up to the last completed one,
       // then append the cancelled entry.
-      const completedStatuses = STATUS_ORDER.filter((s) => historyMap.has(s));
+      const completedStatuses = statusOrder.filter((s) => historyMap.has(s));
       const cancelledAt = historyMap.get('cancelled') ?? null;
 
       timeline = completedStatuses.map((status) => ({
         status,
-        label:        STATUS_LABELS[status] ?? status,
+        label:        statusLabels[status] ?? status,
         changed_at:   historyMap.get(status),
         is_completed: true,
         is_current:   false,
@@ -691,22 +823,22 @@ async function getOrderTimeline(req, res, next) {
 
       timeline.push({
         status:       'cancelled',
-        label:        STATUS_LABELS['cancelled'],
+        label:        statusLabels['cancelled'],
         changed_at:   cancelledAt,
         is_completed: true,
         is_current:   true,
       });
     } else {
       // Normal flow: show all canonical statuses; mark past ones completed.
-      const currentIndex = STATUS_ORDER.indexOf(current_status);
+      const currentIndex = statusOrder.indexOf(current_status);
 
-      timeline = STATUS_ORDER.map((status, idx) => {
+      timeline = statusOrder.map((status, idx) => {
         const isCompleted = idx < currentIndex || status === current_status;
         const isCurrent   = status === current_status;
 
         return {
           status,
-          label:        STATUS_LABELS[status] ?? status,
+          label:        statusLabels[status] ?? status,
           changed_at:   historyMap.get(status) ?? null,
           is_completed: isCompleted,
           is_current:   isCurrent,
@@ -718,6 +850,7 @@ async function getOrderTimeline(req, res, next) {
       order_id:       orderId,
       order_number,
       current_status,
+      delivery_preference,
       timeline,
     });
   } catch (err) {
@@ -923,13 +1056,142 @@ async function reuploadReceipt(req, res, next) {
   }
 }
 
+// ─── GET /api/orders/:id/rider-location ───────────────────────────────────────
+// §1.9 Rider Live Location
+//
+// Returns the latest GPS coordinates of the rider assigned to this order.
+// Only available when order status = 'out_for_delivery' and the delivery
+// has an assigned rider with a row in rider_locations.
+//
+// Responses:
+//   200  { order_id, rider_id, latitude, longitude, accuracy, updated_at }
+//   204  (no content) — not yet out_for_delivery, or no rider GPS fix yet
+//   404  — order not found / doesn't belong to this customer
+//
+// The Flutter app polls this every 10 s as a fallback.
+// The backend also pushes `rider_location_update` via Socket.io in real time
+// whenever a rider submits a new position (PUT /api/rider/location).
+
+async function getRiderLocation(req, res, next) {
+  try {
+    const customerId = req.customerId;
+    const orderId    = parseInt(req.params.id, 10);
+
+    if (isNaN(orderId)) {
+      return res.status(400).json({ message: 'Invalid order ID.' });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         o.id            AS order_id,
+         o.status        AS order_status,
+         d.rider_id,
+         rl.latitude,
+         rl.longitude,
+         rl.accuracy,
+         rl.updated_at
+       FROM orders o
+       LEFT JOIN deliveries      d  ON d.order_id  = o.id
+       LEFT JOIN rider_locations rl ON rl.rider_id = d.rider_id
+       WHERE o.id          = $1
+         AND o.customer_id = $2
+         AND o.order_type  = 'online'
+       LIMIT 1`,
+      [orderId, customerId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    const row = result.rows[0];
+
+    // Only expose location when rider is actively delivering
+    if (row.order_status !== 'out_for_delivery') {
+      return res.status(204).end();
+    }
+
+    // Rider assigned but no GPS fix yet
+    if (row.rider_id == null || row.latitude == null) {
+      return res.status(204).end();
+    }
+
+    return res.json({
+      order_id:   row.order_id,
+      rider_id:   row.rider_id,
+      latitude:   parseFloat(row.latitude),
+      longitude:  parseFloat(row.longitude),
+      accuracy:   row.accuracy   ? parseFloat(row.accuracy)  : null,
+      updated_at: row.updated_at ? row.updated_at.toISOString() : null,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getCheckoutConfig(req, res, next) {
+  try {
+    let deliveryFee = { enabled: false, amount: 0 };
+    try {
+      const { rows } = await pool.query(
+        `SELECT value FROM system_settings WHERE key = 'delivery_fee'`
+      );
+      if (rows.length > 0) {
+        const setting = rows[0].value;
+        if (setting?.enabled === true) {
+          deliveryFee = { enabled: true, amount: setting.amount ?? 0 };
+        }
+      }
+    } catch (err) {
+      console.error('[getCheckoutConfig] delivery fee lookup failed:', err.message);
+    }
+
+    let qrCodes = [];
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, name, number, image_url
+           FROM payment_qr_codes
+          WHERE is_active = TRUE
+          ORDER BY display_order ASC, id ASC`
+      );
+      qrCodes = rows;
+    } catch (err) {
+      console.error('[getCheckoutConfig] QR codes unavailable:', err.message);
+    }
+
+    let ridersAvailable = true;
+    try {
+      const { rows } = await pool.query(
+        `SELECT 1
+           FROM riders
+          WHERE work_status = 'working'
+             OR admin_work_override = 'working'
+          LIMIT 1`
+      );
+      ridersAvailable = rows.length > 0;
+    } catch (err) {
+      console.error('[getCheckoutConfig] rider availability check failed:', err.message);
+    }
+
+    return res.status(200).json({
+      delivery_fee: deliveryFee,
+      payment_qr_codes: qrCodes,
+      riders_available: ridersAvailable,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   placeOrder,
+  getCheckoutConfig,
   listOrders,
   getOrder,
-  getOrderStatus,    // ← NEW §1.6
-  getOrderTimeline,  // ← NEW §1.6
+  getOrderStatus,    // ← §1.6
+  getOrderTimeline,  // ← §1.6
   cancelOrder,
   reuploadReceipt,
+  getRiderLocation,  // ← §1.9 NEW
   STATUS_LABELS,     // ← exported for use in notification helpers
 };

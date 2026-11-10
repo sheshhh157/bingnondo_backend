@@ -27,6 +27,44 @@ const HISTORY_WINDOW = 8;
 /** Hard cap on menu items sent to the AI to keep the prompt lean. */
 const MAX_MENU_ITEMS_IN_PROMPT = 60;
 
+const OUT_OF_SCOPE_REPLY =
+  "I can help with Bingnondo Cafe's menu, prices, hours, ordering, delivery, and app support. Please ask me about one of those, or use Order Chat for help with an existing order.";
+
+const IN_SCOPE_PATTERNS = [
+  /\b(bingnondo|ndo|caf[eé]|menu|gcash|lalamove|cash on delivery|delivery fee|delivery|rider|pickup|walk[- ]in|opening hours|business hours|operating hours|checkout|cart|profile|account|log ?in|sign ?in|sign ?up|register|app|staff|support|customer service|address|location|store)\b/i,
+  /\b(place|make|cancel|track|check|change|update|my|an?) order\b|\border(?:ing)? (food|from|through|on|via|status|number)\b|\bhow (can|do) i order\b|\b(ordering|umorder|mag[- ]?order|orderin)\b/i,
+  /\b(presyo|magkano|bayad|pagbabayad|oras|bukas ba|sarado ba|saan|pag deliver|tulong)\b/i,
+];
+
+function isWithinChatbotScope(message, menuContext) {
+  const normalizedMessage = message.trim().toLowerCase();
+
+  if (/^(hi|hello|hey|good morning|good afternoon|good evening|thanks|thank you|salamat)[!. ]*$/i.test(normalizedMessage)) {
+    return true;
+  }
+
+  if (IN_SCOPE_PATTERNS.some((pattern) => pattern.test(normalizedMessage))) {
+    return true;
+  }
+
+  const menuItemNames = menuContext
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('• '))
+    .map((line) => line.slice(2).split(' | PHP ')[0].trim().toLowerCase());
+
+  if (menuItemNames.some((name) => normalizedMessage.includes(name))) {
+    return true;
+  }
+
+  const asksForRecommendation =
+    /\b(recommend|suggest|craving|gutom|masarap|kain)\b/i.test(normalizedMessage);
+  const mentionsFood =
+    /\b(food|dish|meal|drink|menu item|pagkain|ulam|inumin)\b/i.test(normalizedMessage);
+
+  return asksForRecommendation && mentionsFood;
+}
+
 // ── System Prompt Builder ─────────────────────────────────────────────────────
 
 /**
@@ -59,7 +97,10 @@ Your scope — you must NEVER answer or reveal:
 - Business financials, sales data, or analytics.
 - How the app or system is built internally.
 
-If a question is completely outside your scope, politely redirect.
+Answer ONLY questions about Bingnondo Cafe and its menu, ordering, delivery,
+hours, payments, and app support. Do not answer unrelated questions, even if
+they are mixed with an in-scope question. For unrelated questions, reply:
+"${OUT_OF_SCOPE_REPLY}"
 If you are unsure, say so honestly rather than guessing.
 
 --- LIVE MENU DATA (as of right now) ---
@@ -211,9 +252,11 @@ async function sendMessage(req, res) {
       { role: 'user', content: userMessage },
     ];
 
-    // 4. Call the AI (with automatic key fallback)
+    // 4. Only send in-scope messages to the AI (with automatic key fallback)
     const systemPrompt = buildSystemPrompt(menuContext);
-    const { text: botReply } = await callWithFallback(messages, systemPrompt);
+    const botReply = isWithinChatbotScope(userMessage, menuContext)
+      ? (await callWithFallback(messages, systemPrompt)).text
+      : OUT_OF_SCOPE_REPLY;
 
     // 5. Persist both sides of the exchange
     await db.query(`
@@ -271,4 +314,9 @@ async function getHistory(req, res) {
   }
 }
 
-module.exports = { sendMessage, getHistory };
+module.exports = {
+  sendMessage,
+  getHistory,
+  isWithinChatbotScope,
+  OUT_OF_SCOPE_REPLY,
+};

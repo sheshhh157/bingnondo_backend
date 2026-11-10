@@ -12,15 +12,23 @@ const { requireCustomer } = require('../../middleware/auth');
 const { uploadReceipt } = require('../../config/cloudinary');
 const {
   placeOrder,
+  getCheckoutConfig,
   listOrders,
   getOrder,
   getOrderStatus,
   getOrderTimeline,
   cancelOrder,
   reuploadReceipt,
+  getRiderLocation,  // ← §1.9 NEW
 } = require('./orders.controller');
 
 const router = express.Router();
+
+/**
+ * GET /api/orders/checkout-config
+ * Checkout settings, active payment QR codes, and rider availability.
+ */
+router.get('/checkout-config', requireCustomer, getCheckoutConfig);
 
 // Rate limiter for order placement — prevent spam
 const orderPlaceLimiter = rateLimit({
@@ -69,6 +77,17 @@ router.get('/:id/status', requireCustomer, getOrderStatus);
  * Returns all canonical statuses with is_completed, is_current, changed_at.
  */
 router.get('/:id/timeline', requireCustomer, getOrderTimeline);
+
+/**
+ * GET /api/orders/:id/rider-location
+ * §1.9 Live GPS position of the rider assigned to this order.
+ * Returns 200 + coords when out_for_delivery and rider has a GPS fix.
+ * Returns 204 (no content) when not yet dispatched or no fix yet.
+ *
+ * IMPORTANT: Must be declared before /:id/cancel to avoid Express
+ * treating "rider-location" as a route param value.
+ */
+router.get('/:id/rider-location', requireCustomer, getRiderLocation);
 
 /**
  * POST /api/orders/:id/cancel

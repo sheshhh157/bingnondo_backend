@@ -31,7 +31,6 @@ async function getProfile(req, res, next) {
          c.first_name,
          c.last_name,
          c.mobile_number,
-         c.mobile_verified,
          c.address,
          c.latitude,
          c.longitude,
@@ -56,7 +55,6 @@ async function getProfile(req, res, next) {
       first_name:        row.first_name,
       last_name:         row.last_name,
       mobile_number:     row.mobile_number,
-      mobile_verified:   row.mobile_verified,
       address:           row.address,
       latitude:          row.latitude,
       longitude:         row.longitude,
@@ -79,9 +77,8 @@ async function getProfile(req, res, next) {
 // Rules:
 //   - Once all four text fields are provided, profile_completed is set to TRUE.
 //   - latitude/longitude are the saved default delivery pin (optional).
-//   - mobile_number change does NOT re-trigger OTP here (OTP is a separate
-//     flow). The mobile_number is stored and mobile_verified reset to FALSE
-//     if the number changed — staff / a separate verify endpoint handles OTP.
+//   - mobile_number is stored as profile/contact data; no OTP verification is
+//     performed when it changes.
 //   - Blank strings are treated as missing (not stored).
 
 async function updateProfile(req, res, next) {
@@ -91,7 +88,7 @@ async function updateProfile(req, res, next) {
 
     // Fetch current row first
     const current = await pool.query(
-      'SELECT first_name, last_name, mobile_number, address, latitude, longitude, mobile_verified FROM customers WHERE id = $1',
+      'SELECT first_name, last_name, mobile_number, address, latitude, longitude FROM customers WHERE id = $1',
       [customerId]
     );
 
@@ -117,9 +114,7 @@ async function updateProfile(req, res, next) {
       ? lngNum
       : cur.longitude;
 
-    // If mobile_number changed, reset mobile_verified
-    const mobileChanged    = newMobileNumber !== cur.mobile_number;
-    const newMobileVerified = mobileChanged ? false : cur.mobile_verified;
+    const mobileChanged = newMobileNumber !== cur.mobile_number;
 
     // If mobile changed, check uniqueness
     if (mobileChanged && newMobileNumber) {
@@ -146,13 +141,11 @@ async function updateProfile(req, res, next) {
            address           = $4,
            latitude          = $5,
            longitude         = $6,
-           mobile_verified   = $7,
-           profile_completed = $8,
+           profile_completed = $7,
            updated_at        = NOW()
-       WHERE id = $9
+       WHERE id = $8
        RETURNING id, email, first_name, last_name, mobile_number,
-                 mobile_verified, address, latitude, longitude,
-                 profile_completed, status`,
+                 address, latitude, longitude, profile_completed, status`,
       [
         newFirstName,
         newLastName,
@@ -160,7 +153,6 @@ async function updateProfile(req, res, next) {
         newAddress      || null,
         newLatitude,
         newLongitude,
-        newMobileVerified,
         profileCompleted,
         customerId,
       ]
@@ -185,7 +177,6 @@ async function updateProfile(req, res, next) {
       first_name:        row.first_name,
       last_name:         row.last_name,
       mobile_number:     row.mobile_number,
-      mobile_verified:   row.mobile_verified,
       address:           row.address,
       latitude:          row.latitude,
       longitude:         row.longitude,

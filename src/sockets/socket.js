@@ -31,19 +31,21 @@ const ROOMS = {
 // ── Server-emitted event names ────────────────────────────────────────────────
 const EVENTS = {
   // §1.3
-  MENU_UPDATE:         'menu_update',
+  MENU_UPDATE:           'menu_update',
   // §1.6
-  ORDER_STATUS_UPDATE: 'order_status_update',
+  ORDER_STATUS_UPDATE:   'order_status_update',
   // §1.7
-  SUPPORT_MESSAGE:     'support_message',      // new chat message (customer ↔ staff)
-  SUPPORT_CHAT_STATUS: 'support_chat_status',  // chat locked / unlocked
+  SUPPORT_MESSAGE:       'support_message',      // new chat message (customer ↔ staff)
+  SUPPORT_CHAT_STATUS:   'support_chat_status',  // chat locked / unlocked
   // §1.8
-  NEW_NOTIFICATION:    'new_notification',     // ← NEW: in-app notification push
+  NEW_NOTIFICATION:      'new_notification',     // in-app notification push
+  // §1.9
+  RIDER_LOCATION_UPDATE: 'rider_location_update', // ← NEW: live rider GPS push
   // §2.2 / §3.1
-  NEW_ORDER:           'new_order',
+  NEW_ORDER:             'new_order',
   // §3.2
-  KITCHEN_ALERT:       'kitchen_alert',
-  KITCHEN_ALERT_CLEAR: 'kitchen_alert_clear',
+  KITCHEN_ALERT:         'kitchen_alert',
+  KITCHEN_ALERT_CLEAR:   'kitchen_alert_clear',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,6 +252,26 @@ function emitSupportMessage(customerId, messagePayload) {
 }
 
 /**
+ * emitRiderLocation(orderId, locationPayload)
+ * §1.9 — Pushes a rider_location_update event to the per-order room so the
+ * customer's tracking screen can move the rider marker without polling.
+ *
+ * Payload shape (matches RiderLocation.fromJson in Flutter):
+ *   { order_id, rider_id, latitude, longitude, accuracy, updated_at }
+ *
+ * Called from PUT /api/rider/location whenever a rider submits a new GPS fix.
+ */
+function emitRiderLocation(orderId, locationPayload) {
+  try {
+    getIO()
+      .to(`order:${orderId}`)
+      .emit(EVENTS.RIDER_LOCATION_UPDATE, locationPayload);
+  } catch (err) {
+    console.warn('[socket] emitRiderLocation skipped:', err.message);
+  }
+}
+
+/**
  * emitCustomerNotification(customerId, notificationPayload)
  * §1.8 — Pushes a new_notification event to the customer's personal room.
  * The Flutter NotificationsProvider listens for this to update the badge
@@ -279,5 +301,6 @@ module.exports = {
   emitKitchenAlert,
   emitKitchenAlertClear,
   emitSupportMessage,          // §1.7
-  emitCustomerNotification,    // §1.8 NEW
+  emitCustomerNotification,    // §1.8
+  emitRiderLocation,           // §1.9 NEW
 };

@@ -3,12 +3,18 @@ const { Pool, types } = require('pg');
 // NUMERIC (OID 1700) → JS number, so JSON sends 250.5 instead of "250.50"
 types.setTypeParser(1700, (v) => parseFloat(v));
 
+const databaseConfig = process.env.DATABASE_URL
+  ? { connectionString: process.env.DATABASE_URL }
+  : {
+      host: process.env.DB_HOST,
+      port: parseInt(process.env.DB_PORT || '5432'),
+      database: process.env.DB_NAME,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+    };
+
 const pool = new Pool({
-  host: process.env.DB_HOST,
-  port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
+  ...databaseConfig,
   // Keep a small pool — this is a cafe app, not high-traffic SaaS
   max: 10,
   idleTimeoutMillis: 30000,

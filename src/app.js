@@ -36,6 +36,8 @@ app.get('/health', (_req, res) =>
 const authRoutes        = require('./modules/auth/auth.routes');
 const chatbotRoutes     = require('./modules/chatbot/chatbot.routes');
 const menuRoutes        = require('./modules/menu/menu.routes');
+const reviewRoutes      = require('./modules/menu/review.routes');
+const businessHoursRoutes = require('./modules/business-hours/business_hours.routes');
 const customerRoutes    = require('./modules/customer/customer.routes');
 const ordersRoutes      = require('./modules/orders/orders.routes');
 const paymentsRoutes    = require('./modules/payments/payments.routes');
@@ -52,17 +54,23 @@ const {
   notificationsRouter: notificationsRouter,            // PUT /api/notifications/...
 } = require('./modules/notifications/notifications.routes');
 
+// §1.9 Rider live location — PUT /api/rider/location (rider device pushes GPS)
+const riderLocationRouter = require('./modules/rider/rider_location_route');
+
 app.use('/api/auth',          authRoutes);
 app.use('/api/chatbot',       chatbotRoutes);
+app.use('/api/menu/items',    reviewRoutes);   // ← Reviews: /api/menu/items/:id/reviews
 app.use('/api/menu',          menuRoutes);
+app.use('/api/business-hours', businessHoursRoutes);           // ← Open/Closed + order window
 app.use('/api/customer',      customerRoutes);
 app.use('/api/customer',      notificationsCustomerRouter);  // ← §1.8 GET /api/customer/notifications
 app.use('/api/orders',        ordersRoutes);
 app.use('/api/payments',      paymentsRoutes);
 app.use('/api/support-chat',  supportChatRoutes);
 app.use('/api/geo',           geoRoutes);
-app.use('/api/internal',      internalRoutes);             // ← bridge (web → app)
+app.use('/api/internal',      internalRoutes);              // ← bridge (web → app)
 app.use('/api/notifications', notificationsRouter);          // ← §1.8 PUT /api/notifications/:id/read
+app.use('/api/rider',         riderLocationRouter);          // ← §1.9 PUT /api/rider/location
 
 app.use((_req, res) => res.status(404).json({ message: 'Not found.' }));
 

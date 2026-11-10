@@ -1,5 +1,7 @@
 'use strict';
 
+const pool = require('../../config/db');
+
 /**
  * payments.controller.js  —  GCash Receipt OCR
  * ──────────────────────────────────────────────
@@ -145,4 +147,54 @@ async function extractReceipt(req, res, next) {
   }
 }
 
-module.exports = { extractReceipt, extractGcashRef, extractGcashAmount };
+// ─── GET /api/payments/qr-code ────────────────────────────────────────────────
+// Returns the active GCash QR code (name, number, image_url) for the checkout
+// screen. The admin manages this via the dashboard (payment_qr_codes table).
+// Returns 404 if no active QR has been configured yet.
+async function getActiveQrCode(req, res, next) {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, number, image_url
+       FROM payment_qr_codes
+       WHERE is_active = TRUE
+       ORDER BY display_order ASC, created_at ASC
+       LIMIT 1`
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'No active QR code configured.' });
+    }
+
+    const qr = result.rows[0];
+    return res.json({
+      id:        qr.id,
+      name:      qr.name,
+      number:    qr.number,
+      image_url: qr.image_url,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── GET /api/payments/delivery-fee ──────────────────────────────────────────
+// Returns the current delivery fee from system_settings.
+// Returns { amount: 69, enabled: true } or { amount: 0, enabled: false }.
+async function getDeliveryFee(req, res, next) {
+  try {
+    const result = await pool.query(
+      `SELECT value FROM system_settings WHERE key = 'delivery_fee'`
+    );
+
+    if (result.rows.length === 0 || result.rows[0].value.enabled === false) {
+      return res.json({ amount: 0, enabled: false });
+    }
+
+    const { amount, enabled } = result.rows[0].value;
+    return res.json({ amount: amount ?? 0, enabled: enabled ?? false });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { extractReceipt, extractGcashRef, extractGcashAmount, getActiveQrCode, getDeliveryFee };
