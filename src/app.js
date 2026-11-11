@@ -10,6 +10,7 @@ require('./config/db');
 const ensureSchema = require('./config/ensureSchema');
 
 const app = express();
+app.set('trust proxy', 1); // Required for Railway/reverse proxy (rate limiting + IP detection)
 
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
