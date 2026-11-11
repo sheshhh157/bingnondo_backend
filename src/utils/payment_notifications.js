@@ -23,6 +23,7 @@
  */
 
 const { emitCustomerNotification } = require('../sockets/socket');
+const { sendCustomerPush } = require('./firebase_push');
 
 const PAYMENT_MESSAGES = {
   approved: 'Your GCash payment has been verified! Your order is being processed.',
@@ -66,6 +67,7 @@ async function notifyPaymentStatus(db, orderId, customerId, paymentEvent, extra 
 
   // ── 2. Real-time push via Socket.io ─────────────────────────────────────────
   if (insertedRow) {
+    void sendCustomerPush(customerId, insertedRow);
     try {
       emitCustomerNotification(customerId, {
         id:                   insertedRow.id,

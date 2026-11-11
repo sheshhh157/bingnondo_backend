@@ -6,6 +6,8 @@
  * Route table (all protected by requireCustomer middleware):
  *
  *   GET  /api/customer/notifications         → list, paginated, with unread_count
+ *   POST /api/customer/notifications/device-token → register an FCM device
+ *   DELETE /api/customer/notifications/device-token → unregister an FCM device
  *   PUT  /api/notifications/read-all         → batch mark all unread → read
  *   PUT  /api/notifications/:id/read         → mark single notification as read
  *
@@ -33,6 +35,8 @@ const {
   listNotifications,
   markOneRead,
   markAllRead,
+  registerDeviceToken,
+  removeDeviceToken,
 } = require('./notifications.controller');
 
 // ── /api/customer prefix ──────────────────────────────────────────────────────
@@ -44,6 +48,8 @@ const customerRouter = express.Router();
  * Query params: limit, before_id, unread_only
  */
 customerRouter.get('/notifications', requireCustomer, listNotifications);
+customerRouter.post('/notifications/device-token', requireCustomer, registerDeviceToken);
+customerRouter.delete('/notifications/device-token', requireCustomer, removeDeviceToken);
 
 // ── /api/notifications prefix ─────────────────────────────────────────────────
 const notificationsRouter = express.Router();

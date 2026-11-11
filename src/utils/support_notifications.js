@@ -22,6 +22,7 @@
  */
 
 const { emitCustomerNotification } = require('../sockets/socket');
+const { sendCustomerPush } = require('./firebase_push');
 
 /**
  * notifySupportReply
@@ -52,6 +53,7 @@ async function notifySupportReply(db, messageId, customerId, staffName = 'Suppor
 
   // ── 2. Real-time push via Socket.io ─────────────────────────────────────────
   if (insertedRow) {
+    void sendCustomerPush(customerId, insertedRow);
     try {
       emitCustomerNotification(customerId, {
         id:           insertedRow.id,

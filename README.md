@@ -65,6 +65,59 @@ Server starts on `http://localhost:3000` (or `PORT` from `.env`).
 
 ---
 
+## Firebase Push Notifications
+
+The backend sends Firebase Cloud Messaging (FCM) pushes for the same persisted
+order, payment, and staff-reply notifications returned by
+`GET /api/customer/notifications`. The push body is the exact `message` stored
+in the database. Push delivery is disabled until valid service-account JSON is
+configured; in-app notifications continue to be saved as usual.
+
+### Firebase and Railway setup
+
+1. Create a Firebase project at [Firebase Console](https://console.firebase.google.com/).
+2. In **Project settings → General**, register the Android and iOS apps using
+   the application IDs from the Flutter app. The mobile app's Firebase client
+   configuration and token registration are documented in its Flutter README.
+3. In **Project settings → Service accounts**, choose **Generate new private
+   key**. Store the complete downloaded JSON as the Railway variable
+   `FIREBASE_SERVICE_ACCOUNT_JSON`. Do not commit it or share the private key.
+   This backend uses Firebase Admin SDK 14, so configure Railway to run Node.js
+   22 or newer.
+4. The Firebase **Web API key** is shown under **Project settings → General →
+   Your apps**. It is client configuration (placeholder:
+   `FIREBASE_API_KEY=your_firebase_client_api_key_here`), not a server
+   credential and is not read by this backend. Never use it in place of the
+   service-account JSON.
+5. Apply `migrations/2026-11-11_customer_fcm_tokens.sql` to the Supabase
+   PostgreSQL database.
+6. After Firebase is initialized in Flutter and notification permission is
+   granted, register each device token while the customer is signed in:
+
+   ```
+   POST /api/customer/notifications/device-token
+   Authorization: Bearer <customer_access_token>
+   Content-Type: application/json
+
+   { "token": "<FCM device token>", "platform": "android" }
+   ```
+
+   Use `"ios"` on Apple devices. On logout, remove that device token:
+
+   ```
+   DELETE /api/customer/notifications/device-token
+   Authorization: Bearer <customer_access_token>
+   Content-Type: application/json
+
+   { "token": "<FCM device token>" }
+   ```
+
+The mobile app must handle notification taps and request notification
+permission. Push delivery itself is performed by Firebase; Vercel does not need
+to send it.
+
+---
+
 ## Email Setup (OTP sending)
 
 The backend uses **Nodemailer** — works with any SMTP provider.

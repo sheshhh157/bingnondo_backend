@@ -33,6 +33,7 @@
  */
 
 const { emitOrderStatusUpdate, emitCustomerNotification } = require('../sockets/socket');
+const { sendCustomerPush } = require('./firebase_push');
 
 /**
  * Human-readable messages per status transition.
@@ -107,6 +108,7 @@ async function notifyOrderStatus(db, orderId, customerId, newStatus, extra = {})
   // Pushes a 'new_notification' event to the customer's personal room so the
   // Notifications screen refreshes its badge count without polling.
   if (insertedRow) {
+    void sendCustomerPush(customerId, insertedRow);
     try {
       emitCustomerNotification(customerId, {
         id:                  insertedRow.id,

@@ -34,9 +34,8 @@
  * Real-time push:
  *   When a new notification is inserted (by order_notifications.js,
  *   payment_notifications.js, or support_chat.controller.js), the server
- *   emits a `new_notification` event to the customer's socket room
- *   (`customer:${customerId}`). The Flutter app listens for this event
- *   and increments the badge count or refreshes the list.
+ *   emits a `new_notification` event to the customer's socket room and sends
+ *   an FCM push to the customer's registered devices.
  *
  *   Socket room: customer room is `customer:${customerId}` — see socket.js.
  *   The customer joins this room with the `join_customer` socket event
@@ -44,6 +43,48 @@
  */
 
 const pool = require('../../config/db');
+
+async function registerDeviceToken(req, res, next) {
+  try {
+    const { token, platform = 'unknown' } = req.body || {};
+    if (typeof token !== 'string' || token.trim().length === 0 || token.length > 4096) {
+      return res.status(422).json({ message: 'A valid FCM token is required.' });
+    }
+    if (!['android', 'ios', 'unknown'].includes(platform)) {
+      return res.status(422).json({ message: "platform must be 'android', 'ios', or 'unknown'." });
+    }
+
+    await pool.query(
+      `INSERT INTO customer_fcm_tokens (customer_id, fcm_token, platform)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (fcm_token) DO UPDATE
+         SET customer_id = EXCLUDED.customer_id,
+             platform = EXCLUDED.platform,
+             updated_at = NOW()`,
+      [req.customerId, token.trim(), platform]
+    );
+    return res.status(200).json({ message: 'Device registered for push notifications.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function removeDeviceToken(req, res, next) {
+  try {
+    const { token } = req.body || {};
+    if (typeof token !== 'string' || token.trim().length === 0 || token.length > 4096) {
+      return res.status(422).json({ message: 'A valid FCM token is required.' });
+    }
+
+    await pool.query(
+      'DELETE FROM customer_fcm_tokens WHERE customer_id = $1 AND fcm_token = $2',
+      [req.customerId, token.trim()]
+    );
+    return res.status(200).json({ message: 'Device removed from push notifications.' });
+  } catch (err) {
+    next(err);
+  }
+}
 
 // ── Pagination defaults ────────────────────────────────────────────────────────
 const DEFAULT_LIMIT  = 30;
@@ -215,4 +256,10 @@ function formatNotification(row) {
   };
 }
 
-module.exports = { listNotifications, markOneRead, markAllRead };
+module.exports = {
+  listNotifications,
+  markOneRead,
+  markAllRead,
+  registerDeviceToken,
+  removeDeviceToken,
+};
