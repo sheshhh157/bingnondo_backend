@@ -2,29 +2,41 @@ const jwt = require('jsonwebtoken');
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET;
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
-const ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES_IN || '30m';
-const REFRESH_EXPIRES = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+const MANILA_UTC_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function getNextManilaMidnightEpoch(now = new Date()) {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new TypeError('now must be a valid Date.');
+  }
+
+  const manilaTime = new Date(now.getTime() + MANILA_UTC_OFFSET_MS);
+  const nextMidnightUtcMs = Date.UTC(
+    manilaTime.getUTCFullYear(),
+    manilaTime.getUTCMonth(),
+    manilaTime.getUTCDate() + 1
+  );
+
+  return Math.floor((nextMidnightUtcMs - MANILA_UTC_OFFSET_MS) / 1000);
+}
 
 /**
  * Sign an access token for a customer.
  * Payload: { sub: customerId, type: 'customer', role: 'customer' }
  */
-function signCustomerAccessToken(customerId) {
+function signCustomerAccessToken(customerId, expiresAt = getNextManilaMidnightEpoch()) {
   return jwt.sign(
-    { sub: customerId, type: 'customer', role: 'customer' },
+    { sub: customerId, type: 'customer', role: 'customer', exp: expiresAt },
     ACCESS_SECRET,
-    { expiresIn: ACCESS_EXPIRES }
   );
 }
 
 /**
  * Sign a refresh token for a customer.
  */
-function signCustomerRefreshToken(customerId) {
+function signCustomerRefreshToken(customerId, expiresAt = getNextManilaMidnightEpoch()) {
   return jwt.sign(
-    { sub: customerId, type: 'customer' },
+    { sub: customerId, type: 'customer', exp: expiresAt },
     REFRESH_SECRET,
-    { expiresIn: REFRESH_EXPIRES }
   );
 }
 
@@ -48,4 +60,5 @@ module.exports = {
   signCustomerRefreshToken,
   verifyAccessToken,
   verifyRefreshToken,
+  getNextManilaMidnightEpoch,
 };

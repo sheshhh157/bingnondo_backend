@@ -196,6 +196,10 @@ Body: { "email": "customer@example.com", "password": "..." }
 → 403  suspended              →  "Account suspended. Contact support."
 ```
 
+Customer access and refresh tokens expire at the next 12:00 AM in the
+Asia/Manila timezone. The mobile app clears the local session at expiry, so the
+customer must sign in again each day.
+
 #### User object returned on login / verify-otp:
 ```json
 {

@@ -7,6 +7,7 @@ const { sendOtpEmail }            = require('../../utils/mailer');
 const {
   signCustomerAccessToken,
   signCustomerRefreshToken,
+  getNextManilaMidnightEpoch,
 } = require('../../utils/jwt');
 
 const BCRYPT_ROUNDS = 12;
@@ -28,9 +29,10 @@ function safeCustomer(row) {
 }
 
 function issueTokens(customerId) {
+  const expiresAt = getNextManilaMidnightEpoch();
   return {
-    accessToken:  signCustomerAccessToken(customerId),
-    refreshToken: signCustomerRefreshToken(customerId),
+    accessToken:  signCustomerAccessToken(customerId, expiresAt),
+    refreshToken: signCustomerRefreshToken(customerId, expiresAt),
   };
 }
 
